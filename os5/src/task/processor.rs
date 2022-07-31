@@ -8,10 +8,12 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
+use crate::config::{MAX_SYSCALL_NUM, BIG_STRIDE};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+use crate::mm::*;
 
 /// Processor management structure
 pub struct Processor {
@@ -57,6 +59,8 @@ pub fn run_tasks() {
             let mut task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
             task_inner.task_status = TaskStatus::Running;
+            // accumulate stride 
+            task_inner.stride += BIG_STRIDE / task_inner.priority;
             drop(task_inner);
             // release coming task TCB manually
             processor.current = Some(task);
@@ -67,6 +71,41 @@ pub fn run_tasks() {
             }
         }
     }
+}
+
+// get status of the current task
+pub fn get_current_task_status() -> TaskStatus {
+    let task = current_task().unwrap();
+    let status = task.inner_exclusive_access().get_status();
+    status
+}
+
+pub fn get_current_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    let task = current_task().unwrap();
+    let syscall_times = task.inner_exclusive_access().get_syscall_times();
+    syscall_times
+}
+
+pub fn incr_syscall_times(syscall_id: usize) {
+    let task = current_task().unwrap();
+    task.inner_exclusive_access().set_syscall_times(syscall_id);
+}
+
+pub fn set_mmap(start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) -> bool {
+    let task = current_task().unwrap();
+    let memory_set = &mut task.inner_exclusive_access().memory_set;
+    memory_set.set_mmap(start_va, end_va, perm)
+}
+
+pub fn set_munmap(start_va: VirtAddr, end_va: VirtAddr) -> bool {
+    let task = current_task().unwrap();
+    let memory_set = &mut task.inner_exclusive_access().memory_set;
+    memory_set.set_munmap(start_va, end_va)
+}
+
+pub fn set_priority(prio: isize) {
+    let task = current_task().unwrap();
+    task.inner_exclusive_access().priority = prio as u8;
 }
 
 /// Get current task through take, leaving a None in its place
