@@ -5,19 +5,15 @@
 //! and the replacement and transfer of control flow of different applications are executed.
 
 
-
-
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
-use crate::config::MAX_SYSCALL_NUM;
-use crate::mm::VirtAddr;
 use crate::sync::UPSafeCell;
-use crate::syscall;
-use crate::timer::get_time_us;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+
+use crate::{config, mm, timer};
 
 /// Processor management structure
 pub struct Processor {
@@ -42,42 +38,6 @@ impl Processor {
     }
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(|task| Arc::clone(task))
-    }
-    pub fn get_current_status(&mut self) ->TaskStatus{
-        let pcb = self.current().unwrap();
-        let inner=pcb.inner_exclusive_access();
-        inner.task_status
-    }
-    pub fn set_task_priority(&mut self,prio:usize){
-        let pcb = self.current().unwrap();
-        let mut inner = pcb.inner_exclusive_access();
-        inner.task_priority = prio;
-    }
-    pub fn get_already_time(&mut self)->usize{
-        let now = get_time_us();
-        let pcb = self.current().unwrap();
-        let inner = pcb.inner_exclusive_access();
-        now - inner.start_time
-    }
-    pub fn get_syscall_times(&mut self)->[u32;MAX_SYSCALL_NUM]{
-        let pcb = self.current().unwrap();
-        let inner = pcb.inner_exclusive_access();
-        inner.syscall_times
-    }
-    pub fn syscall_add(&mut self,syscall_id:usize){
-        let pcb = self.current().unwrap();
-        let mut inner =pcb.inner_exclusive_access();
-        inner.syscall_times[syscall_id]+=1
-    }
-    pub fn mmap(&mut self,_start:usize,_len:usize,_port:usize)->isize{
-        let pcb = self.current().unwrap();
-        let mut inner =pcb.inner_exclusive_access();
-        inner.memory_set.mmap(_start, _len, _port)
-    }
-    pub fn munmap(&mut self,_start:usize,_len:usize)->isize{
-        let pcb = self.current().unwrap();
-        let mut inner =pcb.inner_exclusive_access();
-        inner.memory_set.munmap(_start, _len)
     }
 }
 
@@ -146,37 +106,92 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     }
 }
 
-pub fn get_current_status()->TaskStatus{
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.get_current_status()
+
+pub fn update_syscall_time(id: usize) {
+    let task = current_task().unwrap();
+    // **** access current TCB exclusively
+    let mut inner = task.inner_exclusive_access();
+    inner.syscall_times[id] += 1;
 }
 
-pub fn set_task_priority(prio:usize){
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.set_task_priority(prio)
+pub fn get_syscall_time() -> [u32; config::MAX_SYSCALL_NUM] {
+    current_task().unwrap().inner_exclusive_access().syscall_times
 }
 
-pub fn get_already_time()->usize{
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.get_already_time()
+pub fn get_run_time() -> usize {
+    let start_time = current_task().unwrap().inner_exclusive_access().start_time;
+    timer::get_time_us() - start_time
 }
 
-pub fn syscall_add(syscall_id:usize){
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.syscall_add(syscall_id)
+pub fn set_priority(_prio: isize) -> isize {
+    if _prio < 2 {
+        return -1;
+    } else {
+        current_task().unwrap().inner_exclusive_access().priority = _prio as u8;
+        return _prio;
+    }
 }
 
-pub fn get_syscall_times()->[u32;MAX_SYSCALL_NUM]{
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.get_syscall_times()
+pub fn mmap(_start: usize, _len: usize, _port: usize) -> isize {
+    if (_start % config::PAGE_SIZE != 0) || (_port & !0x7 != 0) || (_port & 0x7 == 0) {
+        return -1;
+    }
+    let start_address = mm::VirtAddr(_start);
+    let end_address = mm::VirtAddr(_start + _len);
+
+    let map_permission = mm::MapPermission::from_bits((_port as u8) << 1).unwrap() | mm::MapPermission::U;
+
+    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
+        if let Some(pte) = current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .memory_set
+            .translate(vpn) {
+            if pte.is_valid() {
+                return -1;
+            }
+        };
+    }
+
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .memory_set
+        .insert_framed_area(start_address, end_address, map_permission);
+
+    0
 }
 
-pub fn mmap(_start:usize,_len:usize,_port:usize)->isize{
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.mmap(_start, _len, _port)
+pub fn munmap(_start: usize, _len: usize) -> isize {
+    if _start % config::PAGE_SIZE != 0 {
+        return -1;
+    }
+
+    let start_address = mm::VirtAddr(_start);
+    let end_address = mm::VirtAddr(_start + _len);
+
+    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
+        match current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .memory_set
+            .translate(vpn) {
+            Some(pte) => {
+                if pte.is_valid() == false {
+                    return -1;
+                }
+            }
+            None => {
+                return -1;
+            }
+        }
+    }
+
+    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
+        current_task().unwrap().inner_exclusive_access().memory_set.remove_area_with_start_vpn(vpn);
+    }
+
+    0
 }
 
-pub fn munmap(_start:usize,_len:usize)->isize{
-    let mut processor = PROCESSOR.exclusive_access();
-    processor.munmap(_start, _len)
-}
+
