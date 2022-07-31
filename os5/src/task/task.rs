@@ -2,7 +2,7 @@
 
 use super::TaskContext;
 use super::{pid_alloc, KernelStack, PidHandle};
-use crate::config::{TRAP_CONTEXT, MAX_SYSCALL_NUM};
+use crate::config::TRAP_CONTEXT;
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -13,6 +13,7 @@ use core::cell::RefMut;
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
+//#[derive(Eq, PartialEq)]
 pub struct TaskControlBlock {
     // immutable
     /// Process identifier
@@ -46,12 +47,9 @@ pub struct TaskControlBlockInner {
     pub children: Vec<Arc<TaskControlBlock>>,
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
-
-    pub start_time: usize,
-    pub syscall_times: [u32; MAX_SYSCALL_NUM],
-
-    pub priority: u8,
-    pub stride: usize,
+    /// stride algorithm
+    pub pass: isize,
+    pub prio: isize,
 }
 
 /// Simple access to its internal fields
@@ -109,11 +107,8 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
-                    priority: 16,
-                    stride: 0,
-
-                    start_time: 0,
-                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    pass: 0,
+                    prio: 16,
                 })
             },
         };
@@ -181,11 +176,8 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
-                    priority: 16,
-                    stride: 0,
-
-                    start_time: 0,
-                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    pass: 0,
+                    prio: 16,
                 })
             },
         });
@@ -200,55 +192,48 @@ impl TaskControlBlock {
         // ---- release parent PCB automatically
         // **** release children PCB automatically
     }
+    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
+        let task_control_block = Arc::new(TaskControlBlock::new(elf_data));
+        task_control_block.inner_exclusive_access().parent = Some(Arc::downgrade(self));
+
+        let mut parent_inner = self.inner_exclusive_access();
+        parent_inner.children.push(task_control_block.clone());
+
+        task_control_block
+    }
+    pub fn set_priority(self: &Arc<TaskControlBlock>, prio: isize) {
+        let mut inner = self.inner_exclusive_access();
+        inner.prio = prio;
+    }
+
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
+}
 
-    pub fn spawn(self: &Arc<TaskControlBlock>, _elf_data: &[u8]) -> Arc<TaskControlBlock> {
-        // ---- access parent PCB exclusively
-        let mut parent_inner = self.inner_exclusive_access();
-        // copy user space(include trap context)
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(_elf_data);
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
-        // alloc a pid and a kernel stack in kernel space
-        let pid_handle = pid_alloc();
-        let kernel_stack = KernelStack::new(&pid_handle);
-        let kernel_stack_top = kernel_stack.get_top();
-        let task_control_block = Arc::new(TaskControlBlock {
-            pid: pid_handle,
-            kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
-                    base_size: parent_inner.base_size,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    priority: 16,
-                    stride: 0,
+use core::cmp::Ordering;
 
-                    start_time: 0,
-                    syscall_times: [0; MAX_SYSCALL_NUM],
-                })
-            },
-        });
-        // add child
-        parent_inner.children.push(task_control_block.clone());
-        // modify kernel_sp in trap_cx
-        // **** access children PCB exclusively
-        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
-        *trap_cx = TrapContext::app_init_context(entry_point, user_sp, KERNEL_SPACE.exclusive_access().token(), kernel_stack_top, trap_handler as usize);
-        trap_cx.kernel_sp = kernel_stack_top;
-        // return
-        task_control_block
-        // ---- release parent PCB automatically
-        // **** release children PCB automatically
+impl Eq for TaskControlBlock {
+
+}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.pid.0 == other.pid.0
+    }
+}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let lpass = self.inner_exclusive_access().pass;
+        let rpass = other.inner_exclusive_access().pass;
+        rpass.cmp(&lpass)
+    }
+}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 

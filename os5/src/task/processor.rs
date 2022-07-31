@@ -13,8 +13,6 @@ use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
 
-use crate::{config, mm, timer};
-
 /// Processor management structure
 pub struct Processor {
     /// The task currently executing on the current processor
@@ -105,93 +103,3 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }
-
-
-pub fn update_syscall_time(id: usize) {
-    let task = current_task().unwrap();
-    // **** access current TCB exclusively
-    let mut inner = task.inner_exclusive_access();
-    inner.syscall_times[id] += 1;
-}
-
-pub fn get_syscall_time() -> [u32; config::MAX_SYSCALL_NUM] {
-    current_task().unwrap().inner_exclusive_access().syscall_times
-}
-
-pub fn get_run_time() -> usize {
-    let start_time = current_task().unwrap().inner_exclusive_access().start_time;
-    timer::get_time_us() - start_time
-}
-
-pub fn set_priority(_prio: isize) -> isize {
-    if _prio < 2 {
-        return -1;
-    } else {
-        current_task().unwrap().inner_exclusive_access().priority = _prio as u8;
-        return _prio;
-    }
-}
-
-pub fn mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    if (_start % config::PAGE_SIZE != 0) || (_port & !0x7 != 0) || (_port & 0x7 == 0) {
-        return -1;
-    }
-    let start_address = mm::VirtAddr(_start);
-    let end_address = mm::VirtAddr(_start + _len);
-
-    let map_permission = mm::MapPermission::from_bits((_port as u8) << 1).unwrap() | mm::MapPermission::U;
-
-    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
-        if let Some(pte) = current_task()
-            .unwrap()
-            .inner_exclusive_access()
-            .memory_set
-            .translate(vpn) {
-            if pte.is_valid() {
-                return -1;
-            }
-        };
-    }
-
-    current_task()
-        .unwrap()
-        .inner_exclusive_access()
-        .memory_set
-        .insert_framed_area(start_address, end_address, map_permission);
-
-    0
-}
-
-pub fn munmap(_start: usize, _len: usize) -> isize {
-    if _start % config::PAGE_SIZE != 0 {
-        return -1;
-    }
-
-    let start_address = mm::VirtAddr(_start);
-    let end_address = mm::VirtAddr(_start + _len);
-
-    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
-        match current_task()
-            .unwrap()
-            .inner_exclusive_access()
-            .memory_set
-            .translate(vpn) {
-            Some(pte) => {
-                if pte.is_valid() == false {
-                    return -1;
-                }
-            }
-            None => {
-                return -1;
-            }
-        }
-    }
-
-    for vpn in mm::VPNRange::new(mm::VirtPageNum::from(start_address), end_address.ceil()) {
-        current_task().unwrap().inner_exclusive_access().memory_set.remove_area_with_start_vpn(vpn);
-    }
-
-    0
-}
-
-

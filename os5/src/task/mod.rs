@@ -22,15 +22,14 @@ use alloc::sync::Arc;
 use lazy_static::*;
 use manager::fetch_task;
 use switch::__switch;
+use crate::config::BIG_STRIDE;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
-pub use manager::{add_task};
+pub use manager::add_task;
 pub use pid::{pid_alloc, KernelStack, PidHandle};
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-
-    set_priority, mmap, munmap, update_syscall_time, get_run_time, get_syscall_time
 };
 
 /// Make current task suspended and switch to the next task
@@ -43,6 +42,10 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    // update pass
+    let prio = task_inner.prio;
+    task_inner.pass += BIG_STRIDE / prio;
+
     drop(task_inner);
     // ---- release current PCB
 
