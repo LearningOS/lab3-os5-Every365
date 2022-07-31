@@ -16,8 +16,6 @@ mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;
-mod stride;
-pub use stride::Stride;
 
 use crate::loader::get_app_data_by_name;
 use alloc::sync::Arc;
@@ -30,10 +28,11 @@ pub use context::TaskContext;
 pub use manager::add_task;
 pub use pid::{pid_alloc, KernelStack, PidHandle};
 pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,get_current_status,set_task_priority,
+    get_already_time,syscall_add,get_syscall_times,mmap,munmap
+
 };
-use crate::config::PAGE_SIZE;
-use crate::mm::{VirtPageNum, VPNRange, MapPermission, VirtAddr};
+use crate::config::BIG_STRIDE;
 
 /// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {
@@ -45,6 +44,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    task_inner.task_stride = task_inner.task_stride + BIG_STRIDE / task_inner.task_priority;
     drop(task_inner);
     // ---- release current PCB
 
@@ -101,68 +101,3 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
-
-
-pub fn mmap(start: usize, len: usize, prot: usize) -> isize {
-    if (start % PAGE_SIZE) != 0 ||
-        (prot & !0x7 != 0) || (prot & 0x7 == 0) {
-            return -1;
-    }
-    let mut length = len;
-    if len % PAGE_SIZE != 0 {
-        length = len + (PAGE_SIZE - len % PAGE_SIZE);
-    }
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-
-    let vpn_start = VirtPageNum::from(start / PAGE_SIZE);
-    let vpn_end = VirtPageNum::from((start + length) / PAGE_SIZE);
-    let vpn_range = VPNRange::new(vpn_start, vpn_end);
-    for vpn in vpn_range {
-        if inner.memory_set.find_vpn(vpn) {
-            return -1;
-        }
-    }
-    let permission = MapPermission::from_bits((prot as u8) << 1).unwrap() | MapPermission::U;
-    inner.memory_set.insert_framed_area(
-        VirtAddr::from(start),
-        VirtAddr::from(start + length),
-        permission
-    );
-    for vpn in vpn_range {
-        if false == inner.memory_set.find_vpn(vpn) {
-            return -1;
-        }
-    }
-    0
-}
-
-pub fn munmap(start: usize, len: usize) -> isize {
-    if (start % PAGE_SIZE) != 0 {
-        return -1;
-    }
-    let mut length = len;
-    if len % PAGE_SIZE != 0 {
-        length = len + (PAGE_SIZE - len % PAGE_SIZE);
-    }
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    let vpn_start = VirtPageNum::from(start / PAGE_SIZE);
-    let vpn_end = VirtPageNum::from((start + length) / PAGE_SIZE);
-    let vpn_range = VPNRange::new(vpn_start, vpn_end);
-    for vpn in vpn_range {
-        if !(inner.memory_set.find_vpn(vpn)) {
-            return -1;
-        }
-    }
-    for vpn in vpn_range {
-        inner.memory_set.munmap(vpn);
-    }
-    for vpn in vpn_range {
-        if true == inner.memory_set.find_vpn(vpn) {
-            return -1;
-        }
-    }
-    0
-}
-

@@ -2,13 +2,15 @@
 
 use super::TaskContext;
 use super::{pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT;
+use crate::config::{TRAP_CONTEXT, MAX_SYSCALL_NUM};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_us;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -27,28 +29,18 @@ pub struct TaskControlBlock {
 /// Store the contents that will change during operation
 /// and are wrapped by UPSafeCell to provide mutual exclusion
 pub struct TaskControlBlockInner {
-    /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
-    /// Application data can only appear in areas
-    /// where the application address space is lower than base_size
     pub base_size: usize,
-    /// Save task context
     pub task_cx: TaskContext,
-    /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
-    /// Application address space
     pub memory_set: MemorySet,
-    /// Parent process of the current process.
-    /// Weak will not affect the reference count of the parent
     pub parent: Option<Weak<TaskControlBlock>>,
-    /// A vector containing TCBs of all child processes of the current process
     pub children: Vec<Arc<TaskControlBlock>>,
-    /// It is set when active exit or execution error occurs
     pub exit_code: i32,
-    /// prio
-    pub prio: u8,
-    /// stride
-    pub stride: u8,
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    pub start_time: usize,
+    pub task_priority: usize,                          
+    pub task_stride: usize,                             
 }
 
 /// Simple access to its internal fields
@@ -106,8 +98,10 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
-                    prio: 16u8,
-                    stride: 0u8,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    start_time: get_time_us() / 1000,
+                    task_priority: 16,
+                    task_stride: 0,
                 })
             },
         };
@@ -137,6 +131,7 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        inner.task_priority = 16;
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -175,8 +170,10 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
-                    prio: 16u8,
-                    stride: 0u8,
+                    syscall_times: parent_inner.syscall_times,
+                    start_time: parent_inner.start_time,
+                    task_priority: parent_inner.task_priority,
+                    task_stride: parent_inner.task_stride,
                 })
             },
         });
@@ -193,53 +190,6 @@ impl TaskControlBlock {
     }
     pub fn getpid(&self) -> usize {
         self.pid.0
-    }
-
-    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
-        let mut parent_inner = self.inner_exclusive_access();
-        // copy user space(include trap context)
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
-        // alloc a pid and a kernel stack in kernel space
-        let pid_handle = pid_alloc();
-        let kernel_stack = KernelStack::new(&pid_handle);
-        let kernel_stack_top = kernel_stack.get_top();
-        let task_control_block = Arc::new(TaskControlBlock {
-            pid: pid_handle,
-            kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
-                    base_size: user_sp,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    prio: 16u8,
-                    stride: 0u8,
-                })
-            },
-        });
-        // add child
-        parent_inner.children.push(task_control_block.clone());
-        // modify kernel_sp in trap_cx
-        // **** access children PCB exclusively
-
-        // prepare TrapContext in user space
-        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
-        *trap_cx = TrapContext::app_init_context(
-            entry_point,
-            user_sp,
-            KERNEL_SPACE.exclusive_access().token(),
-            kernel_stack_top,
-            trap_handler as usize,
-        );
-        task_control_block
     }
 }
 
